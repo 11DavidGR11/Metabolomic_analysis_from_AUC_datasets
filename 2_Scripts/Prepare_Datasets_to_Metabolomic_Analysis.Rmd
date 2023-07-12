@@ -1,0 +1,246 @@
+---
+title: "Prepare Datasets to Statistical Analysis - No impute NA values"
+author: "David Garrido Rodríguez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Script description:
+
+The **aim** of this script is to prepare pre-annotated untargeted metabolomics data for use in MetaboAnalyst generating .csv filas which can be use in the statistical analysis [one factor]. It performs several tasks to achieve this:
+
+1. Reads the raw data files from the input folder.
+2. For each file, it performs data preprocessing steps such as remove duplicates metabolites, name the unidentified ones with their *m/z* and their RT values, and select desired columns (individual areas).
+3. Merges the processed data frames based on file names to create dynamic tables. The non common metabolite can be imputed or not just modifying line 68.
+4. Saves the merged data frames as CSV files for further analysis in MetaboAnalyst.
+
+To run this script, you need to provide the input and output folder addresses, as well as an Excel file (.xlsx) containing the desired column (current names), new columns names, and groups for each sample. The structure of this file should follow the instructions provided in point 5 of the usage instructions.
+
+**By performing these steps, the script ensures that the metabolomics data is properly cleaned and formatted, making it compatible with MetaboAnalyst, which is a powerful tool for metabolomics data analysis. Also, dataset will be prepare to be analysed with the script Metabolomic_Analysis.Rmd**
+
+--------------------------------------------------------------------------------
+
+# USAGE INSTRUCTIONS:
+
+1. The environment must be clear. If not, run this chunck:
+```{r}
+rm(list = ls())
+```
+
+2. Input data must be in a individual folder with the next name structure:
+  **"Compounds_essayname_individual_characteristics.xlsx"**
+    --> I.e. = Compounds_compA_noOTA_d2_15_S17:
+      - compC = comparative A of the study
+      - noOTA_d2_15_S17 = no production of OTA, day 2 of sampling, _Penicillium nordicum_ 15, culture medium (salchichón 17% glyc./90 a.w.)
+      
+  Please note that the part following "Compounds_" will determine the new data name and with which other dataset it is going to be merge. In this case, for example, the formatted data from Compounds_compA_noOTA_d2_15_S17 and Compounds_compA_noOTA_d2_15_S25 will be named "compA_merged."
+
+3.The input data should be pre-annotated with the names in the first column (named as "Name") and should have the individual areas of each condition in columns named as 'Area: '.
+
+4. Correspondences excel book must have the following columns but with the information that you need (Aditional_info is opcional). The columns 'name', 'formula', 'mz' and 'RT' must always have that new names:
+
+  | Actual_name  |  New_name  | Additional_info | Group |
+  | ------------ | ---------- | --------------- | ----- |
+  | Area: A1.raw | 2_1_15_S17 |      noOTA      |  G_1  |
+  | Area: A2.raw | 2_2_15_S17 |      noOTA      |  G_1  |
+  | Area: A3.raw | 2_3_15_S17 |       OTA       |  G_2  |
+  | Area: A4.raw | 2_4_15_S17 |       OTA       |  G_2  |
+  |    'm/z'     |     mz     |                 |       |
+  |   RT [min]   |     RT     |                 |       |
+
+5. You will need the following packages
+```{r message=FALSE, warning=FALSE}
+if (!require("tidyverse")) install.packages("tidyverse",repos ="https://cran.rstudio.com/")
+library(tidyverse)
+if (!require("tools")) install.packages("tools")
+library(tools)
+```
+
+--------------------------------------------------------------------------------
+# Set the input, output **folders** and the correspondences excel path here:
+```{r}
+input_folder <- "../1_Data/Untargeted_metabolomic_data/Individual_conditions"
+output_folder <- "../1_Data/Untargeted_metabolomic_data"
+#Correspondences <- "../1_Data/Correspondences.xlsx"
+
+
+# Do you want to impute NA values? Yes/No
+imputation <- "Yes"
+```
+Then, run the RScript by pressing Run/Restard R and Run All Chunks.
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+# Prepare dataset to MetaboAnalyst - STATISTICAL ANALYSIS [ONE FACTOR]:
+
+## Import raw data and edit it
+
+```{r}
+files <- list.files(input_folder)
+env_files <- character()
+
+# Load correspondences dataset and verify that the necessary information is contained
+correspondences <- readxl::read_xlsx(Correspondences)
+  
+if (!all(c("Current_name", "New_name") %in% colnames(correspondences))) {
+  stop("'Current_name' and 'New_name' columns do not exit or have other names in the correspondences dataset you have provide. Check the dataset and rerun.")
+}
+if (!"Group" %in% colnames(correspondences)) {
+  stop("'Group' column do not exit or have other name in the correspondences dataset you have provide. Check the dataset and rerun.")
+}
+
+# Clean data set and prepare them
+for (i in files){
+
+  # Read data files
+  data_path <- file.path(input_folder, i)
+  raw_data <- readxl::read_xlsx(data_path)
+  ## Ensure data have the needed structure:
+  if (!any(grepl("^Name$", names(raw_data), ignore.case = TRUE))) {
+    stop(sprintf("The 'Name' column is not present in the dataset of the file '%s'.", i))
+  } else if (!any(grepl("^Formula", colnames(raw_data), ignore.case = TRUE))) {
+    stop(sprintf("The formula column is not present in the dataset of the file '%s'.", i))
+  } else if (!any(grepl("^Area:", colnames(raw_data)) & !grepl("^Area: (Bl|QC)", colnames(raw_data)))) {
+    stop(sprintf("The individual area columns are not present in the dataset in file '%s'", i))
+  }
+  
+  # After verifying the correct file name, use everything between the first '_' and the file extension as the new file name. In other words, extract the part that comes after 'Compounds_'.
+  if (!grepl("^compounds_", i, ignore.case = TRUE)) {
+    stop(sprintf("Verify that the file '%s' has the appropiated name", i))
+  }
+  new_data_name <- sub(".*?_", "", i) %>% file_path_sans_ext()
+  
+  ## Change column names with the new name given by the correspondences dataset
+  if (!"Additional_info" %in% colnames(correspondences)){
+    for (n in 1:nrow(correspondences)) {
+      current_name <- correspondences$Current_name[n]
+      if (grepl("^area", current_name, ignore.case = TRUE)){
+        new_name <- paste0("area_", correspondences$New_name[n])
+      } else {
+        new_name <- correspondences$New_name[n]
+      }
+      colnames(raw_data)[colnames(raw_data) %in% current_name] <- new_name
+    }
+  } else {
+    for (n in 1:nrow(correspondences)) {
+      current_name <- correspondences$Current_name[n]
+      if (grepl("^area", current_name, ignore.case = TRUE)){
+        new_name <- paste0("area_", correspondences$New_name[n], "_", correspondences$Additional_info[n])
+      } else {
+        new_name <- correspondences$New_name[n]
+      }
+      colnames(raw_data)[colnames(raw_data) %in% current_name] <- new_name
+    }
+  }
+
+  # Substitute NA name metabolites with their formula or mz and RT values:
+  for (n in 1:nrow(raw_data)) {
+    if (is.na(raw_data$name[n])) {
+      if (!is.na(raw_data$formula[n])) {
+        raw_data$name[n] <- gsub("\\s", "", raw_data$formula[n])
+      } else {
+        raw_data$name[n] <- paste0("mz_", raw_data$mz[n], "_&_RT_", raw_data$RT[n])
+      }
+    }
+  }
+  
+  # Sum areas of repeated metabolite and leave only a row for each one
+  new_data <- raw_data %>% 
+    group_by(name) %>%
+    summarize(across(starts_with("Area"), ~sum(., na.rm = TRUE))) %>%
+    ungroup()
+  # Select the desired columns
+  ## Select columns that begin with 'Area' but exclude 'Blank', 'QC', and 'Max'
+  areas <- colnames(new_data)[grepl("^area_", colnames(new_data)) | grepl("^name", colnames(new_data))]
+  new_data <- new_data[, areas]
+  
+  ## Add a new row with the group label
+  group <- c(character(), "group")
+  for (j in 1:nrow(correspondences)) {
+    new_name <- correspondences$New_name[j]
+    if (any(grepl(paste0("area_", new_name), colnames(new_data)))) {
+      group <- c(group, correspondences$Group[j])
+    }
+  }
+  new_data <- rbind(group, new_data)
+
+  # Save data
+  assign(new_data_name, new_data)
+
+  # Save data names in a list for later merging
+  env_files <- c(env_files, new_data_name)
+
+  # Message of everything have work correctly
+  message(sprintf("The initial file '%s' has been successfully edited and saved under the name '%s'.\n - Original dimensions: %d variables and %d observations\n - Updated dimensions: %d variables and %d observations\n - New observations name: %s", i, new_data_name, dim(raw_data)[1], dim(raw_data)[2], dim(new_data)[1], dim(new_data)[2], paste(colnames(new_data), collapse = ", ")))
+  message(" ")
+}
+```
+
+
+## Create dinamics tables:
+
+```{r warning=FALSE}
+
+if (imputation == "Yes") {
+  output_folder <- file.path(output_folder, (paste0("Imputed_ready_to_use")))
+  dir.create(output_folder)
+} else {
+  output_folder <- file.path(output_folder, (paste0("Common_ready_to_use")))
+  dir.create(output_folder)
+}
+
+for (i in 1:length(env_files)) {
+  for (j in (i+1):length(env_files)) {
+  
+    # Checks if the variables env_files[i] and env_files[j] are not NA and are not equal to each other. If env_files[i] and env_files[j] are equal, the code inside the "if block" will not be executed 
+    if (!is.na(env_files[i]) && !is.na(env_files[j]) && env_files[i] != env_files[j]) {
+    
+      # If the first term in the names of env_files[i] and env_files[j] is the same then:
+      if (sub("_.*", "", env_files[i]) == sub("_.*", "", env_files[j])) {
+        # Merge the data frames, including the metabolites that are not common to both conditions
+        merged_data <- merge(get(env_files[i]), get(env_files[j]), by = "name", all = TRUE)
+        
+        # Impute NA values or eliminate those metabolites
+        if (imputation == "Yes") {
+          min <- merged_data[-1, -1] %>% mutate_all(as.numeric) %>%
+            summarize(across(everything(), ~ min(.[. != 0], na.rm = TRUE), .names = "min_{.col}")) %>%
+            pull() %>%
+            min(na.rm = TRUE)          
+          merged_data[is.na(merged_data)] <- min/5
+        } else {
+          merged_data <- na.omit(merged_data)
+        }
+        
+        # Move the row with the group information to the first position of the data frame
+        merged_data <- rbind(merged_data[which(merged_data[, 1] == "group"), ],
+                             merged_data[-which(merged_data[, 1] == "group"), ]) %>% `row.names<-`(NULL)
+      
+        # Save merging
+        assign(paste0(sub("_.*", "", env_files[i]), "_merged_One_Factor"), merged_data)
+        file_path <- file.path(output_folder, (paste0(sub("_.*", "", env_files[i]), "_merged_One_Factor.csv")))
+        write.csv(merged_data, file = file_path, row.names = FALSE)
+        
+        # Print message with information about the merged data frames
+        message(sprintf("- Files '%s' and '%s' have been merged and saved in '%s'. The new dimensions are %d samples and %d metabolites.", env_files[i], env_files[j], file_path, (dim(merged_data)[2]-1), dim(merged_data)[1]))
+        message(" ")
+      }
+    }
+  }
+}
+cat("
+#########################################
+#          CONGRATULATIONS !!!          #
+#           Files Preparation           #
+#               Complete!               #
+#########################################
+
+
+The files are ready to be used On MetaboAnalyst,
+specifically for the Statistical Analysis [one factor]
+
+")
+```
