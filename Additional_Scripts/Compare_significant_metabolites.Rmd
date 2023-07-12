@@ -1,0 +1,126 @@
+---
+title: "Compare significant metabolites"
+author: "David Garrido Rodríguez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE}
+packages <- c("tidyverse", "devtools", "tools", "kableExtra", "UpSetR")
+
+for (package in packages) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    if (package == "NormalizeMets") {
+      devtools::install_github("metabolomicstats/NormalizeMets")
+    } else {
+      install.packages(package)
+    }
+  }
+  library(package, character.only = TRUE)
+}
+
+
+cbind.fill <- function(...){
+  nm <- list(...) 
+  nm<-lapply(nm, as.matrix)
+  n <- max(sapply(nm, nrow)) 
+  do.call(cbind, lapply(nm, function (x) {
+    rbind(x, matrix(NA, n-nrow(x), ncol(x)))
+  }))
+}
+```
+
+
+
+```{r warning=FALSE}
+imputed_input_folder <- "../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use"
+common_input_folder <- "../1_Data/Untargeted_metabolomic_data/Common_ready_to_use"
+output_folder <- "../Supplementary_tables"
+
+#stats_values <- list()
+#LFC_limit <- "LFC_limit"; stats_values[[LFC_limit]] <- 2
+#alpha_value <- "alpha_value"; stats_values[[alpha_value]] <- 0.01
+
+imputed_files <- list.files(imputed_input_folder)
+imputed_files <- imputed_files[grepl("significant", imputed_files, ignore.case = T)]
+
+common_files <- list.files(common_input_folder)
+common_files <- common_files[grepl("significant", common_files, ignore.case = T)]
+
+metaboanalyst_input <- "../1_Data/MetaboAnalyst_data/"
+metaboanalyst_imputed <- list.files(metaboanalyst_input)
+metaboanalyst_imputed <- metaboanalyst_imputed[grepl("imputed_volcano", metaboanalyst_imputed, ignore.case = T)]
+
+metaboanalyst_common <- "../1_Data/MetaboAnalyst_data/"
+metaboanalyst_common <- list.files(metaboanalyst_input)
+metaboanalyst_common <- metaboanalyst_common[grepl("common_volcano", metaboanalyst_common, ignore.case = T)]
+```
+
+
+
+```{r}
+
+my_colors <- c("magenta2", "aquamarine3", "red2", "orange", "purple")
+comparatives <- c("A", "B", "C", "D", "E")
+j = 0
+
+for (i in imputed_files){
+  # Import .csv files with the significant metabolites 
+  ## Imputed NA metabolites analyzed on RStudio
+  data_path <- file.path(imputed_input_folder, i)
+  data1 <- read.csv(data_path) 
+  data1 <- c(data1[, 1], data1[, 2]) %>% na.omit()
+  ## Only common metabolites analyzed on RStudio
+  data_path <- file.path(common_input_folder, i)
+  data2 <- read.csv(data_path)
+  data2 <- c(data2[, 1], data2[, 2]) %>% na.omit()
+  ## Imputed NA metabolites analyzed on MetaboAnalyst
+  data_path <- file.path(metaboanalyst_input, paste0(sub("_.*.?", "", i), "_imputed_volcano.csv"))
+  data3 <- read.csv(data_path)
+  data3 <- data3$X 
+  ## Only common metabolites analyzed on MetaboAnalyst
+  data_path <- file.path(metaboanalyst_input, paste0(sub("_.*.?", "", i), "_common_volcano.csv"))
+  data4 <- read.csv(data_path)
+  data4 <- data4$X 
+    
+  significant <- list("Imputed on RStudio" = data1, "Common on RStudio" = data2,
+                      "Imputed on MetaboAnalyst" = data3, "Common on MetaboAnalyst" = data4)
+  
+  
+  j = j+1
+  
+  # Upset diagram
+  plot <- upset(fromList(significant),
+      number.angles = 0, point.size = 3, line.size = 1,
+      sets.x.label = "Number of significant \n metabolites",
+      mainbar.y.label = NULL, 
+      set_size.show	= T, matrix.color = my_colors[j],
+      set_size.scale_max = max(sapply(significant, length))+50,
+      text.scale = c(1.5, 1.5, 1, 1, 1.4, 2), order.by = "freq") 
+  print(plot)
+  
+  # CSV file with same metabolites name aligned
+  
+  data1 <- as.data.frame(data1) %>% `rownames<-`(.[, 1])
+  data2 <- as.data.frame(data2) %>% `rownames<-`(.[, 1])
+  data3 <- as.data.frame(data3) %>% `rownames<-`(.[, 1])
+  data4 <- as.data.frame(data4) %>% `rownames<-`(.[, 1])
+  
+  significant <- merge(data1, data2, by = 0, all = T) %>% column_to_rownames(., "Row.names")
+  significant <- merge(significant, data3, by = 0, all = T) %>% column_to_rownames(., "Row.names")
+  significant <- merge(significant, data4, by = 0, all = T) %>% column_to_rownames(., "Row.names")
+
+  significant <- significant %>% arrange(., desc(complete.cases(.))) %>%
+    `colnames<-` (c("Non-common metabolites imputed and analyzed on RStudio",
+                  "Common metabolites analyzed on RStudio", 
+                  "Non-common metabolites imputed and analyzed on MetaboAnalyst",
+                  "Common metabolites analyzed on MetaboAnalyst"))
+  
+  write.csv(significant,
+            file = paste0(output_folder, "/",
+                          paste0("Supplementary_table_", j, "_Significant_metabolites_of_Comparative_", comparatives[j], ".csv")),
+            row.names = FALSE, na = "")
+}
+```
+
+
