@@ -1,0 +1,1133 @@
+---
+title: "Metabolomic Analysis Separate Comparatives"
+author: "David Garrido Rodríguez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Script description:
+
+The **aim** of this script is to perform a statistical analysis of untargeted metabolomics data which has been previously pre-treated with the script "Prepare_Datasets_to_Statistical_Analysis.Rmd". This performs several tasks to achieve this end:
+
+1. Read the raw data files from the input folder.
+
+2. Normalize data set with the package "NormalyzerDE" without the need of a design input (it is created with the information given in the input files).
+
+3. After the **review and evaluation of the normalization report by the researcher**, the _**selected data normalized is uploaded by changing line 178**_ with the corresponding file. You can choose among the following options: _CycLoess-normalized.txt, GI-normalized.txt, log2-normalized.txt, mean-normalized.txt, median-normalized.txt, Quantile-normalized.txt, RLR-normalized.txt, VSN-normalized.txt_. If you do not want to use any normalized file, then set it as _"None"_.
+
+4. Data visualization before and after the normalization with box plot from "NormalyMets" package. 
+
+5. Principal Component Analysis (PCA) and Hierarchical Cluster Analysis (HCA) from packages "FactoMineR" and "factoextra" for normalized dataset to check the right group differentiation and a possible batch effect.
+
+6. Statistical analysis, using the "Limma" package, performed to extract the **p-values** and **log2 fold change values (LFC)** for every metabolite in the conducted comparative analysis. Additionally, p-value adjustment methods, such as Benjamini-Hochberg, Bonferroni, and q-values were applied. Tables with the results are given, as well as plots displaying the original p-values and q-values, which are available for visualization.
+
+7. The identification of significant metabolites will be based on the statistical thresholds set at point 4 of the usage instructions. A message will be displayed indicating the number of decreased and increased metabolites for each adjustment method, taking into account the linear model used in the Limma analysis. This will provide insights into the directionality of differential expression for the identified metabolites. _[As the test model was set up as_"contrast <- paste0(group[2],"-",group[1])". _This instruction represent the measures difference in expression levels between Group 2 and Group 1. A positive LFC indicates higher expression in Group 2 compared to Group 1, while a negative LFC indicates higher expression in Group 1 compared to Group 2. The magnitude of the LFC represents the change in expression between the two groups.]_ The number of significant differences will be represented by venn-diagrams ("ggVennDiagram" package) and upset plot ("UpSetR" package).
+
+8. After having **selected a p-value adjustment method in line 750**, the significant metabolites based on the statistical thresholds will be plotted by Mean-Average plots and Volcano plots, also a dynamic volcano plot is displayed where you can see the information for each dot (metabolite). Tables with the 10 most significant metabolites for each comparative will be displayed.
+
+9. Finally, a sparse Partial Least Squares Discriminant Analysis (sPLS-DA) will be conducted using the "mixOmics" package. This analysis uses 2 components and 25 variables. The results for the sPLS-DA analysis include a loadings plot, individual samples plot, variable plot, and a prediction essay. Additionally, predictions results and the top 10 most important variable predictors for each comparative will be presented in tables, providing valuable insights into the predictive power of the model and the variables driving the differences between the comparatives.
+
+
+To run this script, you need to provide the input and output folder addresses, as well as the statistical thresholds. 
+
+--------------------------------------------------------------------------------
+
+# USAGE INSTRUCTIONS:
+
+1. The environment must be clear. If not, run this "chunk":
+```{r}
+rm(list = ls())
+```
+
+2. Input data must proceeded from the script "Prepare_Datasets_to_Statistical_Analysis.Rmd", because they must have the words "one_factor" in their name.
+
+3. You will need the following packages
+```{r message=FALSE, warning=FALSE}
+packages <- c("tidyverse", "plotly", "mixOmics", "devtools", "NormalizeMets", "tools", "kableExtra",
+              "qvalue", "NormalyzerDE", "limma", "FactoMineR", "factoextra", "ggVennDiagram", "UpSetR", "ggpubr",
+              "ggrepel")
+
+for (package in packages) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    if (package == "NormalizeMets") {
+      devtools::install_github("metabolomicstats/NormalizeMets")
+    } else {
+      install.packages(package)
+    }
+  }
+  library(package, character.only = TRUE)
+}
+```
+
+4. Set the input, output **folders** path here, as well as the statistical limits that will be used in the analysis
+```{r warning=FALSE}
+# Please indicate if your data NA values have been impute in the previous script or not. Yes/No
+imputed <- "No"
+
+if (imputed == "Yes") {
+  input_folder <- "../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use"
+  dir.create(paste0(input_folder, "/Normalyze_data"))
+  output_folder <- "../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use/Normalyze_data"
+  dir.create("../Images/Imputed_separate_comparatives")
+  image_folder <- "../Images/Imputed_separate_comparatives"
+} else {
+  input_folder <- "../1_Data/Untargeted_metabolomic_data/Common_ready_to_use"
+  dir.create(paste0(input_folder, "/Normalyze_data"))
+  output_folder <- "../1_Data/Untargeted_metabolomic_data/Common_ready_to_use/Normalyze_data"
+  dir.create("../Images/Common_metabolites")
+  image_folder <- "../Images/Common_metabolites"
+}
+
+# Set Normalize method on line 183 #
+# Set adjusted p-value on line 750 #
+
+# Set the statistical parameters for the significant analysis
+stats_values <- list()
+LFC_limit <- "LFC_limit"; stats_values[[LFC_limit]] <- 2
+alpha_value <- "alpha_value"; stats_values[[alpha_value]] <- 0.01
+
+files <- list.files(input_folder)
+
+files <- files[grepl("one_factor", files, ignore.case = T)]
+```
+
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+# Previous steps to perform with my datasets 
+## PERSONAL USE
+
+To ensure the correc organization of the comparative A columns and accurate assignment of the comparative E groups, it is necessary to execute this specific code section for my data.
+
+```{r}
+for (i in files){
+  # Read data files
+  data_path <- file.path(input_folder, i)
+  data <- read.csv(data_path)
+  group <- data [1, ] %>% .[-1] %>% as.character(.) %>% unique(.)
+  
+  # Perform the changes if necessary
+  if (group[1] == "cA_S17" & group[2] == "cA_S25") {
+    data <- data[, c(1, 5:7, 2:4)]
+    # Overwrite the original file
+    write.csv(data, file = data_path, row.names = FALSE)
+  } else if (group[1] == "cA_S17" & group[2] == "cB_OTA_S17") {
+    group <- c("group", rep("cE_noOTA", 3), rep("cE_OTA", 3))
+    data <- data [-1, ] %>% rbind(group, .)
+    # Overwrite the original file
+    write.csv(data, file = data_path, row.names = FALSE)
+  } 
+}
+
+files <- list.files(input_folder)
+files <- files[grepl("one_factor", files, ignore.case = T)]
+```
+
+
+# Normalization
+
+This code section iterates over a list of files, reads each file's data, prepares the dataset by assigning row names and extracting group information, writes the design and raw data to separate files, applies the normalyzer function for normalization, saves the normalized result, and finally removes temporary files.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+for (i in files){
+    # Read data files
+    data_path <- file.path(input_folder, i)
+    raw_data <- read.csv(data_path)
+    
+    # Prepare dataset
+    rownames(raw_data) <- raw_data$name
+    group <- raw_data[1, -1] %>% as.character()
+    raw_data <- raw_data[-1, -1]
+
+    # Design and temporal objects
+    design <- data.frame(sample=colnames(raw_data), group=group)
+
+    write.table(x = design, file = paste0(output_folder, sub("_.*.?", "", i), "_design.tsv"),
+                quote = F, row.names = F, sep = "\t")
+    write.table(x = raw_data, file = paste0(output_folder, sub("_.*.?", "", i), "_tmp_data.tsv"),
+                quote = F, row.names = F, sep = "\t")
+
+    # NormalyzerDE aplication
+    suppressMessages(normalyzer(jobName = paste0(sub("_.*.?", "", i), "_NormalyzerDE"),
+                                designPath = paste0(output_folder, sub("_.*.?", "", i), "_design.tsv"),
+                                dataPath = paste0(output_folder, sub("_.*.?", "", i), "_tmp_data.tsv"),
+                                outputDir = output_folder))
+    cat(sprintf("File %s has been Normalyzed and the result has been saved in %s.\n", i,
+                paste0(output_folder, "/", sub("_.*.?", "", i), "_NormalyzerDE\n")))
+
+    
+    unlink(paste0(output_folder, sub("_.*.?", "", i), "_design.tsv"), recursive = T)
+    unlink(paste0(output_folder, sub("_.*.?", "", i), "_tmp_data.tsv"), recursive = T)
+}
+```
+
+For the example data that was used to optimize this script and develop the corresponding Final Master Project, you can refer to the normalization summaries in the following files.
+
+[Normalized summary of Comparative A](../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use/Normalyze_data/compA_NormalyzerDE/Norm-report-compA_NormalyzerDE.pdf)
+
+[Normalized summary of Comparative B](../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use/Normalyze_data/compB_NormalyzerDE/Norm-report-compB_NormalyzerDE.pdf)
+
+[Normalized summary of Comparative C](../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use/Normalyze_data/compC_NormalyzerDE/Norm-report-compC_NormalyzerDE.pdf)
+
+[Normalized summary of Comparative D](../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use/Normalyze_data/compD_NormalyzerDE/Norm-report-compD_NormalyzerDE.pdf)
+
+[Normalized summary of Comparative E](../1_Data/Untargeted_metabolomic_data/Imputed_ready_to_use/Normalyze_data/compE_NormalyzerDE/Norm-report-compE_NormalyzerDE.pdf)
+
+
+```{r}
+# You can choose between the followings data normalized files: CycLoess-normalized.txt, GI-normalized.txt, log2-normalized.txt, mean-normalized.txt, median-normalized.txt, Quantile-normalized.txt, RLR-normalized.txt, VSN-normalized.txt. 
+# If you do not want to use any normalized file set "None" 
+
+norm_selected <- "/Quantile-normalized.txt"
+
+if (norm_selected != "None") {
+  
+  for (i in files){
+    # Set the new name for the normalized data that will be analysed
+    name <- paste0(sub("_.*.?", "", i), "_normalized") 
+    data <- read.table(paste0(output_folder, "/", paste0(sub("_.*.?", "", i), "_NormalyzerDE"),
+                              norm_selected), header = T)
+    
+    # Rename rows according to their original names in the not normalized data. It is posible because the order is mainteined during the normalization process but 
+    data2 <- read.csv(paste0(input_folder, "/", i))
+    rownames(data2) <- data2$name
+    group <- data2[1, -1] %>% rownames_to_column(); data2 <- data2[-1, -1]
+    row.names(data) <- row.names(data2)
+    
+    # Reestructure the dataset by rearranging the columns
+    data <- rownames_to_column(data, var = "name")
+    data <- rbind(as.character(group), data)
+    data[is.na(data)] <- 0
+    
+    assign(name, data)            
+    write.csv(data, file = paste0(output_folder, "/", paste0(sub("_.*.?", "", i),
+                                                             "_normalized.csv")), row.names = FALSE)
+    
+    cat(sprintf("File %s normalized by %s method has been saved in %s.\n", i,
+                sub(".*/(.*?)\\-.*", "\\1", norm_selected),
+                paste0(output_folder, "/", paste0(sub("_.*.?", "", i), "_normalized.csv \n"))))
+  }
+  
+  files2 <- ls()
+  files2 <- files2[grepl("normalized", files2, ignore.case = T)]
+  
+  for (i in files){
+    # Set the new name for the normalized data that will be analysed
+    name <- paste0(sub("_.*.?", "", i), "_no_normalized")
+    data_path <- file.path(input_folder, i)
+    data <- read.csv(data_path)
+    assign(name, data) 
+    
+    files <- ls()
+    files <- files[grepl("no_normalized", files, ignore.case = T)]
+  }
+  
+} else {
+  
+  for (i in files){
+    # Set the new name for the normalized data that will be analysed
+    name <- paste0(sub("_.*.?", "", i), "_no_normalized") 
+    data_path <- file.path(input_folder, i)
+    data <- read.csv(data_path)
+    assign(name, data) 
+    
+    files <- ls()
+    files <- files[grepl("no_normalized", files, ignore.case = T)]
+  }
+
+}
+```
+
+## Data visualization
+
+### Boxplot
+
+A box plot is a visual summary of a dataset's distribution. It helps to identify the center, spread, and skewness of the data. To assess data normality using a box plot, look for symmetry, absence of outliers, balanced box length, symmetric whisker length, and a median close to the box center. 
+
+This boxplot has been made thanks to "normalizeMets" package, which use ggplot2 graphs. In raw data case, it was log transformed to set similar axis as the ones of normalized data. 
+
+```{r warning=FALSE}
+plots1 <- list()
+plots2 <- list()
+
+if (norm_selected != "None") {
+  for (i in files){
+      data <- get(i)
+      
+      # Prepare dataset without normalization
+      group <- data[1, ] %>% `row.names<-`(.[, 1]) %>% .[, -1] %>% t()
+      met_names <- data$name %>% .[-1]
+      data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, -1] %>% LogTransform(. ,zerotona=TRUE)
+      data <- data$featuredata %>% t() %>% `colnames<-`(met_names)
+  
+      # Original data visualization (log transformed and numeric format)
+      plot <- RlaPlots(data, group, cex.axis = 0.6, saveplot = F, 
+                       plotname = paste0("BoxPlot of ", sub("_.*.?", "", i), " no normalized"),
+                       savetype = "png", interactiveplot = T)
+      index <- length(plots1) + 1
+      plots1[[index]] <- plot
+  }
+  
+  for (i in files2){
+    data <- get(i)
+    
+    # Prepare dataset normalized
+    group <- data[1, ] %>% `row.names<-`(.[, 1]) %>% .[, -1] %>% t()
+    met_names <- data$name %>% .[-1]
+    data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, -1]
+    data <- data %>% t() %>% `colnames<-`(met_names)
+
+    # Normalized data visualization (log transformed and numeric format)
+    plot <- RlaPlots(data, group, cex.axis = 0.6, saveplot = F, 
+                       plotname = paste0("BoxPlot of ", sub("_.*.?", "", i),
+                                         " normalized by ", sub(".*/(.*?)\\-.*", "\\1", norm_selected), " method"),
+                       savetype = "png", interactiveplot = T)
+    index <- length(plots2) + 1
+    plots2[[index]] <- plot
+  }
+  
+} else {
+  
+  for (i in files){
+      data <- get(i)
+      
+      # Prepare dataset without normalization
+      group <- data[1, ] %>% `row.names<-`(.[, 1]) %>% .[, -1] %>% t()
+      met_names <- data$name %>% .[-1]
+      data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, -1] %>% LogTransform(. ,zerotona=TRUE)
+      data <- data$featuredata %>% t() %>% `colnames<-`(met_names)
+  
+      # Original data visualization (log transformed and numeric format)
+      plot <- RlaPlots(data, group, cex.axis = 0.6, saveplot = F, 
+                       plotname = paste0("BoxPlot of ", sub("_.*.?", "", i), " no normalized"),
+                       savetype = "png", interactiveplot = T)
+      index <- length(plots2) + 1
+      plots2[[index]] <- plot
+  }
+}
+```
+
+```{r echo=FALSE}
+# This code is simply to be able to display the graphics in the html of my personal data.
+if (length(plots1) != 0){
+  plots1[[1]]
+}
+plots2[[1]]
+
+if (length(plots1) != 0){
+  plots1[[2]]
+}
+plots2[[2]]
+
+if (length(plots1) != 0){
+  plots1[[3]]
+}
+plots2[[3]]
+
+if (length(plots1) != 0){
+  plots1[[4]]
+}
+plots2[[4]]
+
+if (length(plots1) != 0){
+  plots1[[5]]
+}
+plots2[[5]]
+```
+
+## Exploratory data analysis 
+
+### Principal Component Analysis (PCA)
+
+Principal Component Analysis (PCA) is a statistical technique that seeks to reduce the dimensionality of a dataset by maximizing the variance. It achieves this by transforming the original variables into a smaller set of uncorrelated variables called principal components. The goal is to retain as much relevant information as possible while minimizing the loss of information. PCA helps simplifying complex datasets, visualize data, and identify the most important patterns or features contributing to the overall variance.
+
+```{r echo=TRUE, warning=FALSE}
+if (norm_selected == "None") {
+  for (i in files) {
+    # Dataset set-up
+    data <- get(i) %>% `row.names<-`(., .[["name"]]) %>% .[-1]
+    group <- as.character(data[1 ,])
+    data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, ] %>% t()
+    # PCA performance
+    tmp_pca <- PCA(data, graph = FALSE, scale.unit = TRUE, quali.sup = 1)
+    ## Boxplot
+    tmp_eig <- tmp_pca$eig %>% .[1:5, ]
+    barplot(tmp_eig[, 2], names.arg=1:nrow(tmp_eig),
+            main = paste("PCA of", sub("_.*.?", "", i), "no normalized"),
+            xlab = "Principal Components",
+            ylab = "Percentage of variances",
+            col ="gold")
+    ## Graph of individuals
+    plot <- fviz_pca_ind(tmp_pca, col.ind = group, 
+               pointsize=1, pointshape=21,fill="black",
+               repel = T, 
+               addEllipses = T, ellipse.type = "confidence",
+               legend.title ="Conditions",
+               show_legend = TRUE, show_guide = TRUE)
+    labels <- rownames(data)
+    plot <- plot + 
+    ggtitle(paste("PC1 & PC2 of", sub("_.*.?", "", i), "no normalized")) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"))
+    ggsave(filename = paste0(image_folder, "/PCA_plot_of_", sub("_.*.?", "", i), "_no_normalized.png"),
+         plot = plot, width = 8, height = 6, dpi = 300)
+    print(plot)
+  }
+} else {
+  for (i in files2) {
+    # Dataset set-up
+    data <- get(i) %>% `row.names<-`(., .[["name"]]) %>% .[-1]
+    group <- as.character(data[1 ,]); names <- colnames(data)
+    data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, ] %>% t()
+    # PCA performance
+    tmp_pca <- PCA(data, graph = FALSE, scale.unit = TRUE, quali.sup = 1)
+    ## Boxplot
+    tmp_eig <- tmp_pca$eig %>% .[1:5, ]
+    barplot(tmp_eig[, 2], names.arg=1:nrow(tmp_eig),
+            main = paste("PCA of", sub("_.*.?", "", i),
+                                        "normalized by", sub(".*/(.*?)\\-.*", "\\1", norm_selected), "method"),
+            xlab = "Principal Components",
+            ylab = "Percentage of variances",
+            col ="gold")
+    ## Graph of individuals
+    plot <- fviz_pca_ind(tmp_pca, col.ind = group, 
+               pointsize=1, pointshape=21,fill="black",
+               repel = T, 
+               addEllipses = T, ellipse.type = "confidence",
+               legend.title ="Conditions",
+               show_legend = TRUE, show_guide = TRUE)
+    labels <- rownames(data)
+    plot <- plot +
+      ggtitle(paste("PC1 & PC2 of", sub("_.*.?", "", i),
+                                        "normalized by", sub(".*/(.*?)\\-.*", "\\1", norm_selected), "method")) +
+      theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"))
+    ggsave(filename = paste0(image_folder, "/PCA_plot_of_", sub("_.*.?", "", i), ".png"),
+         plot = plot, width = 8, height = 6, dpi = 300)
+    print(plot)
+  }
+}
+```
+
+
+### Hierarchical Clustering on Principal Components (HCPC) analysis
+
+HCPC (Hierarchical Clustering on Principal Components) is a statistical method that combines hierarchical clustering and principal component analysis (PCA). It is used for exploratory analysis and clustering of multivariate data.
+
+HCPC first performs PCA on the dataset to obtain principal components that capture the variability in the data. Then, it applies hierarchical clustering on these principal components to group similar observations together based on their distance or similarity measures.
+
+HCPC is particularly useful when dealing with high-dimensional datasets, as it allows for a comprehensive exploration of the data by revealing the underlying clusters or patterns. It can assist in identifying subgroups within a dataset and gaining a better understanding of the relationships between variables.
+
+```{r echo=TRUE, warning=FALSE}
+if (norm_selected == "None") {
+  for (i in files) {
+    # Dataset set-up
+    data <- get(i) %>% `row.names<-`(., .[["name"]]) %>% .[-1]
+    group <- as.character(data[1 ,])
+    data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, ] %>% t()
+    # HCA performance
+    res.pca <- PCA(data, graph = FALSE,scale.unit = TRUE,quali.sup = 1)
+    res.hcpc <- HCPC(res.pca, graph=FALSE,nb.clust = 2)  
+    plot <- fviz_dend(res.hcpc, k = NULL, cex = 0.7, palette = "lancet", 
+                      label_cols = "black", rect = T, rect_fill = T, rect_border = "lancet",
+                      type="rectangle", labels_track_height = 1000, horiz = T,repel = T) + 
+      ggtitle(paste("Cluster Dendrogram of", sub("_.*.?", "", i), "no normalized")) +
+      theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"))
+    ggsave(filename = paste0(image_folder, "/HCPC_plot_of", sub("_.*.?", "", i), "_no_normalized.png"),
+         plot = plot, width = 8, height = 6, dpi = 300)
+    print(plot)
+  }
+} else {
+  for (i in files2) {
+    # Dataset set-up
+    data <- get(i) %>% `row.names<-`(., .[["name"]]) %>% .[-1]
+    group <- as.character(data[1 ,]); names <- colnames(data)
+    data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, ] %>% t()
+    # HCA performance
+    res.pca <- PCA(data, graph = FALSE,scale.unit = TRUE,quali.sup = 1)
+    res.hcpc <- HCPC(res.pca, graph=FALSE,nb.clust = 2)  
+    plot <- fviz_dend(res.hcpc, k = NULL, cex = 0.7, palette = "lancet", 
+                      label_cols = "black", rect = T, rect_fill = T, rect_border = "lancet",
+                      type="rectangle", labels_track_height = 1000, horiz = T, repel = T) + 
+      ggtitle(paste("Cluster Dendrogram of", sub("_.*.?", "", i),
+                                        "normalized by", sub(".*/(.*?)\\-.*", "\\1", norm_selected), "method")) +
+      theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"))
+    ggsave(filename = paste0(image_folder, "/HCPC_plot_of_", sub("_.*.?", "", i), ".png"),
+         plot = plot, width = 8, height = 6, dpi = 300)
+    print(plot)
+  }
+}
+```
+
+
+## Clear environment
+```{r echo=FALSE}
+env <- ls()
+env_delete <- env[!grepl("normalized|folder|stats|norm_selected|imputed", env, perl = TRUE)]
+rm(list = env_delete, "env", "env_delete")
+
+files <- if (norm_selected != "None") { ls()[grepl("normalized", ls(), ignore.case = TRUE) &
+                                               !grepl("no_normalized", ls(), ignore.case = TRUE)] } else {
+  ls()[grepl("no_normalized", ls(), ignore.case = TRUE)] }
+```
+
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+# Stats
+
+## p-value
+
+The p-value is a measure used in statistical hypothesis testing to determine the significance of a comparison. When the p-value is smaller than a significance level "α", it indicates that there is sufficient evidence to reject the null hypothesis (H0). Most usually "α" value use to be 0.05 (5%) or 0.01 (1%).
+
+In this research, where "α" = 0.05, the null hypothesis suggests that there are no significant differences between the amounts of the metabolite in each condition. By rejecting the H0 and accepting the alternative hypothesis (H1), we conclude that there are statistically significant differences in the amounts of the metabolite between the conditions being compared.
+
+_* H0 ---> there is no difference between the sample groups for the amounts of the metabolites._
+_* H1 ---> There is a difference between the sample groups for the amounts of the metabolites._
+
++ If p-value < 0.05 we refuse the H0 and accept the H1. There are statistically significant differences.
++ If p-value > 0.05 we no refuse the H0. There are no statistically significant differences.
+
+## LFC
+
+This indicates a significant difference in the metabolite's amount between two different conditions. By fixing an LFC value of 1 or -1, we will consider as statistically significant only those metabolites that have a difference in amount of at least two-fold or greater in either direction.
+
+If we fix an LFC value of 2 or -2, we will be more restrictive and consider only those metabolites that have a difference in amount of at least four-fold or greater in either direction. This approach will capture larger and more pronounced changes in metabolite levels.  
+
+```{r warning=FALSE}
+files2 <- vector()
+
+for (i in files){
+  # Dataset set-up
+  data <- get(i) %>% `row.names<-`(., .[["name"]]) %>% .[-1]
+  met_names <- row.names(data) %>% .[-1]
+  group_rep <- as.character(data[1 ,]) %>% table(.)
+  group <- as.character(data[1 ,]) %>% unique(.)  
+  data <- as.data.frame(lapply(data, as.numeric)) %>% .[-1, ] %>% `row.names<-` (., met_names)
+  
+  # Prepare limma assay
+  experimental.design <- model.matrix(~ -1+factor(c(rep(1, group_rep[[1]]),rep(2, group_rep[[2]])))) %>%
+    `colnames<-`(., group)
+  
+  # Limma assay (condition 2 vs. condition 1)
+  linear.fit <- lmFit(data, experimental.design)
+  contrast <- paste0(group[2],"-",group[1])
+  contrast.matrix <- makeContrasts(contrast = contrast, levels = group)
+  contrast.linear.fit <- contrasts.fit(linear.fit, contrast.matrix)
+  contrast.results <- eBayes(contrast.linear.fit)
+  
+  # New dataframe with stats
+  data_stats <- topTable(contrast.results, number = nrow(data), coef = 1)
+  new_name <- paste0(sub("_.*.?", "", i), "_stats")
+  assign(new_name, data_stats)
+  
+  files2 <- append(files2, new_name)
+  
+  output <- paste(rownames(data_stats[1, ]), "has the following statistics",
+                  paste(colnames(data_stats), data_stats[1, ], sep = ": ", collapse = ", "))
+  cat(sprintf("The file %s has been processed using the Limma package, comparing condition %s against condition %s, and the statistical information obtained has been saved in the file %s. Here is an example of the information it contains: metabolite %s\n", i, group[2], group[1], new_name, output))
+  cat("\n")
+}
+
+cat(sprintf("Vector files2 has the following information %s.\n", paste(files2, collapse = ", ")))
+```
+
+### p-value adjustment
+
+**Multiple comparisons** refer to the situation where several pairwise comparisons are made within a dataset or experiment. When conducting multiple comparisons, **the probability of obtaining false positive results (Type I errors) increases**. To address this issue, various statistical methods can be used to adjust the significance level (p-value) or control the overall error rate.
+
+#### Methods to control the Family Wise Error (FWER):
+
+It is a statistical concept that refers to the **probability of making at least one Type I error** (rejecting a true null hypothesis) **among a set of multiple hypothesis tests**. The FWER is a measure that quantifies the overall error rate when multiple hypotheses are tested simultaneously.
+
+##### p-value adjustment by Bonferroni:
+
+It involves dividing the significance level (p-value) by the number of comparisons performed. For example, if there are 10 comparisons being made and a desired overall significance level of 5%, the p-value threshold would be adjusted to 0.005 (0.05 divided by 10). If the p-value obtained in a comparison is lower than this adjusted threshold, it is considered statistically significant. This method adjusts the significance level for each individual hypothesis to maintain the desired FWER. 
+
+#### Methods to control the False Discovery Rate (FDR):
+
+The "BH" and "BY" methods of Benjamini, Hochberg, and Yekutieli control the false discovery rate (FDR), the **expected proportion of false discoveries amongst the rejected hypotheses**. The false discovery rate is a less stringent condition than the family-wise error rate, so these methods are more powerful than the others.
+
+##### p-value adjustment by Benjamini-Hochberg (BH):
+
+The Benjamini-Hochberg method is another technique used to control the type I error in multiple comparisons. Unlike Bonferroni, B-H is less conservative and can be more powerful in detecting statistically significant differences. Instead of adjusting each individual p-value, B-H controls the expected proportion of false discoveries among the rejected hypotheses. This is achieved by ordering the p-values from lowest to highest, calculating a critical value based on the desired FDR rate, and comparing it to each p-value in order. P-values below the critical value are considered statistically significant.
+
+##### q- value:
+
+Just as the p-value gives the expected false positive rate obtained by rejecting the null hypothesis for any result with an equal or smaller p-value, the q-value gives the expected pFDR obtained by rejecting the null hypothesis for any result with an equal or smaller q-value.
+
+**P-VALUE ADJUSTMENT**
+
+```{r}
+for (i in files2) {
+  message(paste("Processing file:", i))
+  data <- get(i)
+  data$p_value_bonferroni <- p.adjust(data$P.Value, method = "bonferroni", n = length(data$P.Value))
+  names(data)[names(data) == "adj.P.Val"] <- "p_value_BH"
+  new_name <- paste0("q_value_", sub("_.*.?", "", i))
+  tmp <- data$P.Value
+  if (i == "compC_stats"){
+    message(paste("Error in qvalue calculation for file:", i))
+    tmp_q_value <- qvalue(tmp, pi0 = 1)
+    message(paste("File", i, "processed successfully with pi0 = 1"))
+    } else {
+      tmp_q_value <- qvalue(tmp)
+      message(paste("File", i, "processed successfully"))
+    }
+  data$q_value <- tmp_q_value$qvalues
+  assign(new_name, tmp_q_value)
+  assign(i, data)
+}
+```
+
+```{r echo=FALSE}
+
+lm_contrast <- list()
+  
+for (i in files){
+  # Dataset set-up
+  group <- get(i) %>% `row.names<-`(., .[["name"]]) %>% .[-1] %>% .[ 1, ] %>% as.character(.) %>% unique(.) %>% rev()
+  #index <- length(lm_contrast) + 1
+  lm_contrast[[sub("_.*.?", "", i)]] <- group
+}
+
+head(compA_stats) %>% 
+  mutate(across(where(is.numeric), ~ifelse(abs(.) < 0.005,
+                                           format(., scientific = TRUE, digits = 2), as.numeric(.)))) %>%
+  kbl(caption = paste("Comparative A statistics of ", lm_contrast$compA[1], "Vs.", lm_contrast$compA[2])) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+head(compB_stats) %>% 
+  mutate(across(where(is.numeric), ~ifelse(abs(.) < 0.005,
+                                           format(., scientific = TRUE, digits = 2), as.numeric(.)))) %>%
+  kbl(caption = paste("Comparative B statistics of ", lm_contrast$compB[1], "Vs.", lm_contrast$compB[2])) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+head(compC_stats) %>% 
+  mutate(across(where(is.numeric), ~ifelse(abs(.) < 0.005,
+                                           format(., scientific = TRUE, digits = 2), as.numeric(.)))) %>%
+  kbl(caption = paste("Comparative C statistics of ", lm_contrast$compC[1], "Vs.", lm_contrast$compC[2])) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+head(compD_stats) %>% 
+  mutate(across(where(is.numeric), ~ifelse(abs(.) < 0.005,
+                                           format(., scientific = TRUE, digits = 2), as.numeric(.)))) %>%
+  kbl(caption = paste("Comparative D statistics of ", lm_contrast$compD[1], "Vs.", lm_contrast$compD[2])) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+head(compE_stats) %>% 
+  mutate(across(where(is.numeric), ~ifelse(abs(.) < 0.005,
+                                           format(., scientific = TRUE, digits = 2), as.numeric(.)))) %>%
+  kbl(caption = paste("Comparative E statistics of ", lm_contrast$compE[1], "Vs.", lm_contrast$compE[2])) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+
+**P-VALUE REPRESENTATION**
+```{r warning=FALSE}
+for (i in files2){
+  # Q-value plots:
+  q_value_plot <- paste0("q_value_", sub("_.*.?", "", i))
+  q_value_plot <- get(q_value_plot)
+  plot(q_value_plot, main = paste("Q-value plots of file", i)) 
+  
+  # P-values histograms:
+  data <- get(i)
+  hist(data$P.Value, main = paste("Original p-value of file", i), 
+       xlab = "p-value", col = "gold")
+}
+```
+
+
+#### Clear environment
+```{r echo=FALSE, warning=FALSE}
+env <- ls()
+  env_delete <- env[!grepl("normalized|folder|stats|files|files2|norm_selected|lm_contrast|no_normalized|imputed",
+                           env, perl = TRUE)]
+rm(list = env_delete, "env", "env_delete", "data_stats")
+```
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+# Graphs and results of significant metabolites
+
+## Significant metabolites
+
+```{r echo=FALSE}
+for (i in files2){
+  data <- get(i)
+  cat(sprintf("SIGNIFICANT METABOLITES in file %s with a LFC value of %g and a α value of %g. \n", i, stats_values$LFC_limit, stats_values$alpha_value))
+  cat("\n")
+
+  # Get the group names to indicate where are increased or decreased each metabolite
+  position <- which(files2 == i); j <- files[position]; group <- get(j)
+  group <- as.character(group[1 ,]) %>% .[-1] %>% unique(.)
+  cat(sprintf("Total number of metabolites is %g. \n", dim(data)[1]))
+  cat("\n")
+  
+  # Select significant metabolites increased and decreased with original p-values
+  increased <- subset(data, logFC > stats_values$LFC_limit  & P.Value < stats_values$alpha_value)
+  decreased <- subset(data, logFC < - stats_values$LFC_limit  & P.Value < stats_values$alpha_value)
+  cat(sprintf("The significant metabolites in file %s by original p-values obteined by limma are %d. \n  - %d are increased. \n  - %d are decreased. \n  - The most significant metabolite increased in %s condition is %s. \n  - Whereas the most significant metabolite decreased in %s condition is %s.", i, (nrow(increased) + nrow(decreased)), nrow(increased), nrow(decreased), group[2], row.names(increased[1, ]), group[2], row.names(decreased[1, ])))
+  cat("\n")
+  cat("\n")
+
+  
+  # Select significant metabolites increased and decreased by Bonferroni p-values
+  increased <- subset(data, logFC > stats_values$LFC_limit  & p_value_bonferroni < stats_values$alpha_value)
+  decreased <- subset(data, logFC < - stats_values$LFC_limit  & p_value_bonferroni < stats_values$alpha_value)
+  cat(sprintf("The significant metabolites in file %s by Bonferroni p-values are %d. \n  - %d are increased. \n  - %d are decreased. \n  - The most significant metabolite increased in %s condition is %s. \n  - Whereas the most significant metabolite decreased in %s condition is %s.", i, (nrow(increased) + nrow(decreased)), nrow(increased), nrow(decreased), group[2], row.names(increased[1, ]), group[2], row.names(decreased[1, ])))
+  cat("\n")
+  cat("\n")
+
+  # Select significant metabolites increased and decreased by Benjamini-Hochberg
+  increased <- subset(data, logFC > stats_values$LFC_limit  & p_value_BH < stats_values$alpha_value)
+  decreased <- subset(data, logFC < - stats_values$LFC_limit  & p_value_BH < stats_values$alpha_value)
+  cat(sprintf("The significant metabolites in file %s by Benjamini-Hochberg p-values are %d. \n  - %d are increased. \n  - %d are decreased. \n  - The most significant metabolite increased in %s condition is %s. \n  - Whereas the most significant metabolite decreased in %s condition is %s.", i, (nrow(increased) + nrow(decreased)), nrow(increased), nrow(decreased), group[2], row.names(increased[1, ]), group[2], row.names(decreased[1, ])))
+  cat("\n")
+  cat("\n")
+
+  # Select significant metabolites increased and decreased by q-value
+  increased <- subset(data, logFC > stats_values$LFC_limit  & q_value < stats_values$alpha_value)
+  decreased <- subset(data, logFC < - stats_values$LFC_limit  & q_value < stats_values$alpha_value)
+  cat(sprintf("The significant metabolites in file %s by q-value testare %d. \n  - %d are increased. \n  - %d are decreased. \n  - The most significant metabolite increased in %s condition is %s. \n  - Whereas the most significant metabolite decreased in %s condition is %s.", i, (nrow(increased) + nrow(decreased)), nrow(increased), nrow(decreased), group[2], row.names(increased[1, ]), group[2], row.names(decreased[1, ])))
+  cat("\n"); cat("\n")
+  cat("|------------------------|")
+  cat("\n"); cat("\n")
+}
+```
+
+## Representation of significant metabolites according to the p-value used
+
+```{r}
+for (i in files2){
+  data <- get(i)
+  # Obtain the significant metabolites by original p-values
+  significant <- subset(data, (logFC > stats_values$LFC_limit & P.Value < stats_values$alpha_value) |
+                          (logFC < -stats_values$LFC_limit & P.Value < stats_values$alpha_value))
+  Original_mets <- row.names(significant)
+  # Obtain the significant metabolites by BH p-values
+  significant <- subset(data, (logFC > stats_values$LFC_limit & p_value_BH < stats_values$alpha_value) |
+                          (logFC < -stats_values$LFC_limit & p_value_BH < stats_values$alpha_value))
+  BH_mets <- row.names(significant)
+  # Obtain the significant metabolites by original p-values
+  significant <- subset(data, (logFC > stats_values$LFC_limit & p_value_bonferroni < stats_values$alpha_value) |
+                          (logFC < -stats_values$LFC_limit & p_value_bonferroni < stats_values$alpha_value))
+  Bonferroni_mets <- row.names(significant)
+  # Obtain the significant metabolites by q-values
+  significant <- subset(data, (logFC > stats_values$LFC_limit & q_value < stats_values$alpha_value) |
+                          (logFC < -stats_values$LFC_limit & q_value < stats_values$alpha_value))
+  Qvalue_mets <- row.names(significant)
+  
+  significant <- list(Original_mets = Original_mets, BH_mets = BH_mets, Bonferroni_mets = Bonferroni_mets,
+                      Qvalue_mets = Qvalue_mets)
+
+  # Performance Venn diagram
+  random_color <- sample(colors(), 1)
+  plot <- ggVennDiagram(significant, label_alpha = 0.4) +
+    scale_fill_gradient(low="white", high = random_color) + labs(fill = "Significant \nmetabolites") +
+    ggtitle(paste("Venn Diagram of file", i,"with the significant \nmetabolites according to the p-value used")) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"))
+  print(plot)
+  
+  # Upset diagram
+  plot <- upset(fromList(significant),
+      number.angles = 0, point.size = 3, line.size = 1,
+      sets.x.label = "Number of significant \n metabolites",
+      mainbar.y.label = paste("Upset Diagram of file", i,
+                              "\nwith the significant metabolites \naccording to the p-value used
+                              \n\nIntersection Size"), 
+      set_size.show	= T, matrix.color = random_color,
+      set_size.scale_max = max(sapply(significant, length))+50,
+      text.scale = c(1.5, 1.5, 1, 1, 1.4, 2), order.by = "freq") 
+  print(plot)
+}
+```
+
+## Mean-Average (MA) plot
+
+```{r}
+# Set the p_value adjustment method selected to use in the following steps. You can choose between: p_value_BH, p_value_bonferroni, q_value and P.Value
+selected_p_adjustment <- "p_value_BH"
+
+## Create a function that bind columns and complete the missing rows with NA values
+cbind.fill <- function(...){
+  nm <- list(...) 
+  nm<-lapply(nm, as.matrix)
+  n <- max(sapply(nm, nrow)) 
+  do.call(cbind, lapply(nm, function (x) {
+    rbind(x, matrix(NA, n-nrow(x), ncol(x)))
+  }))
+}
+
+for (i in files2) {
+  # Prepare datasets
+  data <- get(i)
+  names(data) <- gsub("logFC", "log2FoldChange", gsub("AveExpr", "baseMean", gsub(selected_p_adjustment, "padj", names(data))))
+  data <- data[c("log2FoldChange", "baseMean", "padj")]
+  
+  # Save significant metabolites as .csv file, filling with NA values till the end of the dataframe.
+  ## Select the desired metabolites to save
+  increased <- subset(data, log2FoldChange > stats_values$LFC_limit  & padj < stats_values$alpha_value) %>%
+    rownames_to_column() %>% .[, 1] %>% as.data.frame()
+  decreased <- subset(data, log2FoldChange < - stats_values$LFC_limit  & padj < stats_values$alpha_value) %>%
+    rownames_to_column() %>% .[, 1] %>% as.data.frame()
+  ## Save data
+  significant_data <- cbind.fill(increased, decreased) %>% `colnames<-`(lm_contrast[sub("_.*.?", "", i)][[1]])
+  write.csv(significant_data, file = paste0(input_folder, "/", paste0(sub("_.*.?", "", i),
+                                                             "_significant_mets.csv")), row.names = FALSE)
+  
+  # Performance MA plot
+  plot <- ggmaplot(
+    data, fdr = stats_values$alpha_value, fc = stats_values$LFC_limit,
+    genenames = row.names(data), detection_call = NULL, size = 1.5,
+    alpha = 1, seed = 42, font.label = c(10, "italic", "black"),
+    label.rectangle = F, palette = c("#B31B21", "#1465AC", "darkgray"), 
+    top = 4, select.top.method = c("padj", "fc"), label.select = NULL,
+    main = NULL, xlab = "Log2 mean expression", ylab = "Log2 fold change",
+    ggtheme = theme_pubr()) + 
+    ggtitle(paste0("MA plot of file ", i, " (", lm_contrast[sub("_.*.?", "", i)][[1]][1],
+                  " Vs. ",lm_contrast[sub("_.*.?", "", i)][[1]][2], ")")) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"))
+  
+  ggsave(filename = paste0(image_folder, "/MA_plot_of_", sub("_.*.?", "", i), ".png"),
+         plot = plot, width = 8, height = 6, dpi = 300)
+  
+  print(plot)
+}
+```
+
+## Volcano plot of significant metabolites
+
+```{r warning=FALSE}
+j = 0
+plots <- list()
+tables1 <- list()
+RDS_files <- list()
+
+for (i in files2){
+  data <- get(i) %>% rownames_to_column("Metabolites") %>% .[c("Metabolites", "logFC", selected_p_adjustment)]
+  data <- data %>% 
+    mutate(Significant = ifelse(abs(logFC) < stats_values$LFC_limit & p_value_BH > stats_values$alpha_value, "ns",
+                         ifelse(logFC >= stats_values$LFC_limit & p_value_BH < stats_values$alpha_value, "up",
+                                ifelse(logFC <= -stats_values$LFC_limit & p_value_BH < stats_values$alpha_value, "down",
+                                       "ns"))))
+  
+  # Make a table with the 10 most significant metabolites to each condition
+  mets <- bind_cols(data %>% arrange(desc(Significant)) %>% head(10) %>% .$Metabolites, 
+                    data %>% arrange(Significant) %>% head(10) %>% .$Metabolites) %>% 
+    `colnames<-`(c(lm_contrast[sub("_.*.?", "", i)][[1]][1], lm_contrast[sub("_.*.?", "", i)][[1]][2]))
+  ## Save data set in a list with the correspondence name
+  RDS_files[[sub("_.*.?", "", i)]] <- mets
+  
+  j <- j + 1
+  
+  table <- mets %>% 
+    kbl(caption = paste("Table", j,": The 10 most significant metabolites to each condition of",
+                        sub("_.*.?", "", i), "are: ")) %>% 
+    kable_classic(full_width = F, html_font = "Cambria")
+  
+  index <- length(tables1) + 1
+  tables1[[index]] <- table
+  
+  # Make a dataframe with the most significant metabolites, in order to fix them in the volcano plot
+  mets <- list()
+  #mets <- bind_rows(data %>% arrange(desc(Significant)) %>% head(5), 
+  #                  data %>% arrange(Significant) %>% head(5))
+  mets <- bind_cols(data %>% arrange(desc(Significant)) %>% head(2) %>% .$Metabolites, 
+                    data %>% arrange(Significant) %>% head(2) %>% .$Metabolites)
+  mets <- rbind(data[data$Metabolites == "Asenjonamide C", ],
+                data[data$Metabolites == "SPF-32629A", ],
+                data[data$Metabolites == "Pseudouridine", ],
+                data[data$Metabolites == "(S,S)-Anacine", ],
+                data[data$Metabolites == "thiodiglycol", ],
+                data[data$Metabolites == "2-Oxovalericacid", ],
+                data[grep("^Ochratoxin", data$Metabolites), ])
+  
+  plot <- data %>% 
+    ggplot(aes(x=logFC, y=-log10(p_value_BH), color=Significant,
+              text=paste0("</br>Metabolite: ", Metabolites,
+                          "</br>Adj p-value: ", p_value_BH,
+                         "</br>LFC: ", logFC))) +
+    geom_point(alpha=0.75, shape=16) + xlim(-15,15) +
+    theme_gray() + theme(legend.position = "bottom") + 
+    ggtitle(paste0("Volcano plot of file ", i, " (", lm_contrast[sub("_.*.?", "", i)][[1]][1],
+                  " Vs. ",lm_contrast[sub("_.*.?", "", i)][[1]][2], ")")) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold")) +
+    labs(color = "Significant \nMetabolite") + 
+    scale_color_manual(values = c("up" = "#faaa11", "down" = "#26b3ff", "ns" = "grey")) +
+    geom_point(data = mets, aes(color = Significant), size = 4) +
+    geom_text_repel(data = mets, aes(label = Metabolites), size = 3, color = "black")
+
+  print(plot)
+  ggsave(filename = paste0(image_folder, "/Volcano_plot_of_", sub("_.*.?", "", i), ".png"),
+         plot = plot, width = 8, height = 6, dpi = 300)
+  
+  index <- length(plots) + 1
+  plots[[index]] <- plot
+}
+
+#if (imputed == "Yes") {
+#  saveRDS(RDS_files, file = "../../Supplementary_material/1_Data/RDS_files/significant_mets_imputed.rds")
+#} else {
+#  saveRDS(RDS_files, file = "../../Supplementary_material/1_Data/RDS_files/significant_mets_common.rds")
+#}
+
+```
+
+### Dynamic Volcano plot of significant metabolites
+
+```{r echo=FALSE, warning=FALSE}
+# This code is simply to be able to display the graphics in the html of my personal data.
+plot <- plots[[1]] 
+ggplotly(plot)
+
+plot <- plots[[2]] 
+ggplotly(plot)
+
+plot <- plots[[3]] 
+ggplotly(plot)
+
+plot <- plots[[4]] 
+ggplotly(plot)
+
+plot <- plots[[5]] 
+ggplotly(plot)
+```
+
+## Tables with the most significant metabolites for each comparative
+
+```{r}
+tables1[[1]]
+tables1[[2]]
+tables1[[3]]
+tables1[[4]]
+tables1[[5]]
+```
+
+
+#### Clear environment
+```{r echo=FALSE, warning=FALSE}
+env <- ls()
+env_delete <- env[!grepl("folder|stats|files|files2|norm_selected|j|no_normalized|normalized|imputed",
+                         env, perl = TRUE)]
+rm(list = env_delete, "env", "env_delete")
+```
+
+
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+
+# Multivariant analysis
+
+## sPLS-DA
+
+PLS-DA is a statistical method used for classification. It helps to predict or classify samples into different groups based on a set of variables. It is particularly useful for high-dimensional data like metabolomics. By applying PLS-DA, you can identify the important variables that distinguish between different groups, providing valuable insights for further analysis.
+
+In PLS-DA, the method combines the principles of Partial Least Squares (PLS) regression and Discriminant Analysis. It aims to find a linear combination of the predictor variables that maximally explains the variation in the response variable while also maximizing the separation between different groups or categories.
+
+In this case, given the large number of variables available, we decided to perform a sparse PLS-DA analysis. We limited the analysis to 2 components based on the good separation achieved in the PCA assay. Additionally, we reduced the number of variables to 25.
+
+The **prediction capacity** of the "pls" model will be analysed by using the "predict" function from mixOmics package. The algorithim used to identify the similarities between the model and the new data is the **Mahalanobis distance**.
+
+```{r}
+tables1 <- list()
+tables2 <- list()
+RDS_files <- list()
+RDS_files1 <- list()
+
+for (i in files) {
+  j <- j + 1 
+  data <- get(i)
+  Y <- as.character(data[1 ,]) %>% .[-1] %>% as.factor(.)
+  mets <- (data[, 1]) %>% .[-1] %>% as.data.frame() %>% `colnames<-`(., "Mets_names") %>% 
+    mutate(ID = paste0("Metabolite_", 1:(nrow(data)-1)))
+  write.csv(mets, file = paste0(input_folder, "/", paste0(sub("_.*.?", "", i), "_mets_names.csv")), row.names = FALSE)
+  data <- data[-1, -1] %>% mutate_all(as.numeric) %>% t() %>% `colnames<-`(., mets$ID)
+  
+  
+  # Prepare data for the sPLS-DA 
+  ## Remove variables with zero standard deviation
+  sd_values <- apply(data, 2, sd)
+  filtered_data <- data[, sd_values > 0] %>% as.data.frame(); X <- filtered_data
+  
+  # Perform sPLS-DA
+  tmp_pls <- mixOmics::splsda(X, Y, ncomp = 2, 
+                                 keepX = 25, 
+                                 scale = FALSE)
+
+  
+  # Prediction capacity
+  ## Obtain the mean sd value calculated per sample in the dataset
+  mean_sd <- mean(apply(X, 1, sd))
+  ## Randomly select 5 observations from the X matrix
+  set.seed(123)
+  s <- sample(1:nrow(X), 5)
+  Xnew = X[s, , drop = FALSE]
+  ## Modify original samples
+  Xnew = t(apply(Xnew, 1, function(x){x + rnorm(ncol(X), 0, mean_sd/10)}))
+  ## Perform de prediction
+  myprediction = predict(tmp_pls, Xnew, dist = "mahalanobis.dist")
+  ## Save data set in a list with the correspondence name
+  RDS_files[[sub("_.*.?", "", i)]] <- myprediction$class
+  
+  table <- myprediction$class %>% 
+    kbl(caption = paste("Table", j,": The predicted classes for the randomly and edited samples of",
+                        sub("_.*.?", "", i), "are: ")) %>% 
+    kable_classic(full_width = F, html_font = "Cambria")
+  
+  index <- length(tables1) + 1
+  tables1[[index]] <- table
+  
+  
+  # The 10 most important predictor variables selection to each group
+  ## Those with positive weight in component 1 -> group_1
+  group_1 <- tmp_pls$loadings$X %>% as.data.frame() %>% arrange(desc(comp1)) %>% 
+    head(10) %>% row.names() %>% {mets$Mets_names[match(., mets$ID)]}
+  ## Those with negative weight in component 1 -> group_2
+  group_2 <- tmp_pls$loadings$X %>% as.data.frame() %>% arrange(comp1) %>% 
+    head(10) %>% row.names() %>% {mets$Mets_names[match(., mets$ID)]}
+  
+  ## If the sign of the weight for group 1 in the first component is negative, it means that the metabolites associated with group 1 by the sPLS-DA technique will have a negative weight. On the other hand, if the sign of the weight for group 1 is positive, it indicates that the metabolites associated with group 1 by the sPLS-DA technique will have a positive weight.
+  if (sign(tmp_pls$loadings$Y[1,1]) < 0){
+    group <- tmp_pls$loadings$Y %>% row.names()
+  } else {
+    group <- tmp_pls$loadings$Y %>% row.names() %>% rev()
+  }
+  VIP_metabolites <- cbind(group_2, group_1) %>% `colnames<-`(., group)
+  
+  table <- VIP_metabolites %>% 
+    kbl(caption = paste("Table", j+5,": The 10 most important predictor variables of",
+                        sub("_.*.?", "", i), "are: ")) %>% 
+    kable_classic(full_width = F, html_font = "Cambria")
+
+  index <- length(tables2) + 1
+  tables2[[index]] <- table
+  
+  
+  # Save PLS variables loadings in RDS files 
+  ## Change ID by their metabolite name
+  pls_loadings <- tmp_pls$loadings$X %>% .[, 1] %>% as.data.frame() 
+  new_row_names <- rownames(pls_loadings) %>% {mets$Mets_names[match(., mets$ID)]}
+  rownames(pls_loadings) <- new_row_names 
+  ## Save loadings in a .csv file
+  pls_loadings2 <- subset(pls_loadings, . != 0) %>% row.names(.) %>% as.data.frame()
+  write.csv(pls_loadings2, file = paste0(input_folder, "/", sub("_.*.?", "", i), "_pls_loadings.csv"), row.names = F)
+  ## Split the data frame in a positive and negative one. Without 0 weight
+  positive_weight <- subset(pls_loadings, . > 0) %>% arrange(.) %>% `colnames<-`(., group[2])
+  negative_weight <- subset(pls_loadings, . < 0) %>% arrange(.) %>% `colnames<-`(., group[1])
+  ## Save both data set in a list with the correspondence name
+  list_1 <- list()
+  list_1[["positive_weight"]] <- positive_weight; list_1[["negative_weight"]] <- negative_weight
+  RDS_files1[[sub("_.*.?", "", i)]] <- list_1
+  
+  
+  # GRAPHS
+  ## Loadings
+  plotLoadings(tmp_pls, comp = 1, method = 'mean', contrib = 'max',
+               title = paste("Loadings of the 25 principal \nmetabolites of", sub("_.*.?", "", i)))
+
+  ## Variables (Metabolites)
+  plotVar(tmp_pls, comp = c(1,2), 
+        var.names = F, cex = 3, cutoff = 0.8,
+        title = paste("Correlation plot of the 25 \nprincipal metabolites of", sub("_.*.?", "", i)))
+
+  ## HeatMap
+  #Execute directly in console
+  X11()
+  cim(tmp_pls, comp = 1,
+      xlab = "Metabolites", ylab = "Samples", margins = c(7, 15),
+      title = paste("Heatmap of", sub("_.*.?", "", i), 
+                    "\nnormalized by", sub(".*/(.*?)\\-.*", "\\1", norm_selected), "method"), lwid = c(0.1, 0.9)) 
+  dev.off()
+
+  ## Individual samples per component
+  my_colors <- c("steelblue3", "green3")
+  plotIndiv(tmp_pls, comp = 1:2,
+                group = Y, col = my_colors, style = "ggplot2", 
+                title = paste("PC1 & PC2", i), 
+                legend = TRUE, legend.position = "right", 
+                legend.title = "Sampling condition", ellipse = TRUE, 
+                ellipse.level = 0.95, centroid = FALSE)
+}
+
+#if (imputed == "Yes") {
+#  saveRDS(RDS_files, file = "../../Supplementary_material/1_Data/RDS_files/Imputed_predictions_results.rds")
+#  saveRDS(RDS_files1, file = "../../Supplementary_material/1_Data/RDS_files/Imputed_loadings_pls_comparatives.rds")
+#} else {
+#  saveRDS(RDS_files, file = "../../Supplementary_material/1_Data/RDS_files/Common_predictions_results.rds")
+#  saveRDS(RDS_files1, file = "../../Supplementary_material/1_Data/RDS_files/Common_loadings_pls_comparatives.rds")
+#}
+```
+
+### Tables
+
+#### Tables of predictions results:
+
+```{r echo=FALSE}
+tables1[[1]]
+tables1[[2]]
+tables1[[3]]
+tables1[[4]]
+tables1[[5]]
+```
+
+#### Tables of most important predictor variables:
+
+```{r echo=FALSE}
+tables2[[1]]
+tables2[[2]]
+tables2[[3]]
+tables2[[4]]
+tables2[[5]]
+```
+
+
+### HeatMap
+
+HeatMaps from the pls data. To see more information run the code in the console and consulte the graph.  
+
+![HeatMap comparative A](../Images/Imputed_separate_comparatives/Heatmap_compA.png)
+
+![HeatMap comparative B](../Images/Imputed_separate_comparatives/Heatmap_compB.png)
+
+![HeatMap comparative C](../Images/Imputed_separate_comparatives/Heatmap_compC.png)
+
+![HeatMap comparative D](../Images/Imputed_separate_comparatives/Heatmap_compD.png)
+
+![HeatMap comparative E](../Images/Imputed_separate_comparatives/Heatmap_compE.png)
+
+
+#### HeatMap of PLS-DA (all metabolites)
+
+![HeatMap comparative A of all metabolites](../Images/Imputed_separate_comparatives/heatmaps/compA_heatmap.png)
+
+![HeatMap comparative B of all metabolites](../Images/Imputed_separate_comparatives/heatmaps/compB_heatmap.png)
+
+![HeatMap comparative C of all metabolites](../Images/Imputed_separate_comparatives/heatmaps/compC_heatmap.png)
+
+![HeatMap comparative D of all metabolites](../Images/Imputed_separate_comparatives/heatmaps/compD_heatmap.png)
+![HeatMap comparative E of all metabolites](../Images/Imputed_separate_comparatives/heatmaps/compE_heatmap.png)
+
+
+
+```{r echo=FALSE}
+cat("\n")
+cat("########  ##   ##  ######     ######  ##    ##  ######   \n")
+cat("   ##     ##   ##  ##         ##      ###   ##  ##   ##  \n")
+cat("   ##     ##   ##  ##         ##      ####  ##  ##    ## \n")
+cat("   ##     #######  ######     ######  ## ## ##  ##     ##\n")
+cat("   ##     ##   ##  ##         ##      ##  ####  ##    ## \n")
+cat("   ##     ##   ##  ##         ##      ##   ###  ##   ##  \n")
+cat("   ##     ##   ##  ######     ######  ##    ##  ######   \n")
+cat("\n")
+cat("Script completed successfully!\n")
+```
+
